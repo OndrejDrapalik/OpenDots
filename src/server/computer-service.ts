@@ -9,13 +9,8 @@ import {
 } from '../shared/computer-types.js';
 import type { WorkspaceStore } from './workspace.js';
 import type { PlatformConfig } from './platform-config.js';
-const stateSchema = z.object({
-  botId: z.string(),
-  container: z.string(),
-  status: z.string(),
-  port: z.number().int().min(1024).max(65535).optional(),
-  url: z.string().optional(),
-});
+import { SupervisorHost, type ComputerHost } from './computer-host.js';
+import { E2BHost } from './computer-e2b.js';
 const controlSchema = z.object({
   holder: z.enum(['bot', 'human']),
   requested: z.boolean(),
@@ -24,19 +19,28 @@ const controlSchema = z.object({
   request: z.object({ id: z.string(), status: z.string() }).optional(),
 });
 export class ComputerService {
+  /** Provisions and locates computers; the service only talks to OpenBot's computer API. */
+  readonly host: ComputerHost;
   constructor(
     private workspace: WorkspaceStore,
     private config: PlatformConfig,
     private paused: () => boolean,
     private transport: typeof fetch = fetch,
     private deadlineMs = 70000,
-  ) {}
+    host?: ComputerHost,
+  ) {
+    if (config.computerToken && config.computerToken.trim().length < 24)
+      throw new Error('COMPUTER_TOKEN must contain at least 24 characters.');
+    this.host =
+      host ??
+      (config.computerProvider === 'e2b'
+        ? new E2BHost(config, (id) => this.token(id), workspace.computers)
+        : new SupervisorHost(config, (path, body, signal) =>
+            this.supervisor(path, body, signal),
+          ));
+  }
   get configured() {
-    return !!(
-      this.config.computerSupervisorUrl?.trim() &&
-      this.config.computerSupervisorToken?.trim() &&
-      this.config.computerToken?.trim()
-    );
+    return !!this.config.computerToken?.trim() && this.host.configured;
   }
   private token(id: string) {
     return createHmac('sha256', this.config.computerToken!.trim())
@@ -67,6 +71,7 @@ export class ComputerService {
     body: unknown | undefined,
     signal?: AbortSignal,
     dotId?: string,
+    infrastructureHeaders: Record<string, string> = {},
   ): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.deadlineMs);
@@ -77,6 +82,7 @@ export class ComputerService {
       const response = await this.transport(url, {
         method: body === undefined ? 'GET' : 'POST',
         headers: {
+          ...infrastructureHeaders,
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
           ...(dotId ? { 'x-openbot-bot-id': dotId } : {}),
@@ -111,7 +117,8 @@ export class ComputerService {
       for (const secret of [
         token,
         this.config.computerToken?.trim(),
-        this.config.computerSupervisorToken?.trim(),
+        ...this.host.secrets,
+        ...Object.values(infrastructureHeaders),
       ])
         if (secret) text = text.split(secret).join('[redacted]');
       return JSON.parse(text);
@@ -141,71 +148,31 @@ export class ComputerService {
       signal,
     );
   }
-  private endpoint(id: string, raw: unknown) {
-    const state = stateSchema.parse(raw);
-    const ns = this.config.computerNamespace ?? 'opendots';
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(ns))
-      throw new Error('Invalid computer namespace.');
-    const expected = `${ns}-computer-${id}`;
-    if (state.botId !== id || state.container !== expected)
-      throw new Error('Computer identity mismatch.');
-    const url = new URL(
-      state.url ??
-        (state.port
-          ? `http://127.0.0.1:${state.port}`
-          : `http://${expected}:4100`),
-    );
-    const network =
-      url.hostname === expected.toLowerCase() && url.port === '4100';
-    const local =
-      url.hostname === '127.0.0.1' &&
-      !!state.port &&
-      url.port === String(state.port) &&
-      new URL(this.config.computerSupervisorUrl!).hostname === '127.0.0.1';
-    if (
-      url.protocol !== 'http:' ||
-      url.username ||
-      url.password ||
-      url.pathname !== '/' ||
-      url.search ||
-      url.hash ||
-      (!network && !local)
-    )
-      throw new Error('Computer endpoint is not bound to this Dot.');
-    return url.origin;
-  }
-  private async existing(id: string, signal?: AbortSignal) {
-    const listing = z
-      .object({ computers: z.array(stateSchema) })
-      .parse(await this.supervisor('/computers', undefined, signal));
-    return listing.computers.find((c) => c.botId === id);
-  }
   private async running(id: string, signal?: AbortSignal) {
-    const state = await this.existing(id, signal);
-    if (!state || state.status !== 'running')
-      throw new Error('Start this Dot’s computer first.');
-    return this.endpoint(id, state);
+    const origin = await this.host.running(id, signal);
+    if (!origin) throw new Error('Start this Dot’s computer first.');
+    return origin;
   }
   async status(id: string): Promise<ComputerStatus> {
     this.requireDot(id);
     const base = {
       configured: this.configured,
+      provider: this.host.provider,
       permissions: this.workspace.computers.permissions(id),
       audit: this.workspace.computers.audit(id),
     };
     if (!this.configured) return { ...base, state: 'not_configured' };
     try {
-      const state = await this.existing(id);
-      if (!state || state.status !== 'running')
-        return { ...base, state: 'stopped' };
-      const url = this.endpoint(id, state);
+      const url = await this.host.running(id);
+      if (!url) return { ...base, state: 'stopped' };
       const control = controlSchema.parse(
         await this.json(
-          `${url}/control`,
+          `${url.origin}/control`,
           this.token(id),
           undefined,
           undefined,
           id,
+          url.headers,
         ),
       );
       return { ...base, state: 'running', control };
@@ -214,7 +181,9 @@ export class ComputerService {
         ...base,
         state: 'unavailable',
         error:
-          'Computer service is unavailable. Check the supervisor configuration and connection.',
+          this.host.provider === 'e2b'
+            ? 'Computer service is unavailable. Check E2B_API_KEY, the template and the sandbox.'
+            : 'Computer service is unavailable. Check the supervisor configuration and connection.',
       };
     }
   }
@@ -245,7 +214,7 @@ export class ComputerService {
   async start(id: string) {
     await this.audited(id, 'start', 'owner', async () => {
       this.allowed(id, undefined, 'owner');
-      this.endpoint(id, await this.supervisor(`/computers/${id}/ensure`, {}));
+      await this.host.ensure(id);
     });
     return this.status(id);
   }
@@ -253,7 +222,7 @@ export class ComputerService {
     await this.audited(id, 'stop', 'owner', async () => {
       if (!this.configured)
         throw new Error('Computer service is not configured.');
-      await this.supervisor(`/computers/${id}/stop`, {});
+      await this.host.stop(id);
     });
     return this.status(id);
   }
@@ -266,21 +235,23 @@ export class ComputerService {
       if (verb === 'take') this.allowed(id, 'browser', 'owner');
       let control: ComputerControl = controlSchema.parse(
         await this.json(
-          `${url}/control`,
+          `${url.origin}/control`,
           this.token(id),
           undefined,
           undefined,
           id,
+          url.headers,
         ),
       );
       if (verb === 'take' && !control.request)
         control = controlSchema.parse(
           await this.json(
-            `${url}/control/request`,
+            `${url.origin}/control/request`,
             this.token(id),
             { reason: 'Owner requested control.' },
             undefined,
             id,
+            url.headers,
           ),
         );
       if (
@@ -290,21 +261,23 @@ export class ComputerService {
       )
         control = controlSchema.parse(
           await this.json(
-            `${url}/control/request`,
+            `${url.origin}/control/request`,
             this.token(id),
             { reason: 'Owner requested control.' },
             undefined,
             id,
+            url.headers,
           ),
         );
       if (!control.request)
         throw new Error('There is no active control request.');
       await this.json(
-        `${url}/control/${verb}`,
+        `${url.origin}/control/${verb}`,
         this.token(id),
         { requestId: control.request.id },
         undefined,
         id,
+        url.headers,
       );
     });
     return this.status(id);
@@ -348,11 +321,12 @@ export class ComputerService {
           .replace(/^files_/, 'files/')
           .replace(/^human_/, 'human/');
         const result = await this.json(
-          `${url}/${path}`,
+          `${url.origin}/${path}`,
           this.token(id),
           ['read', 'screenshot'].includes(action) ? undefined : parsed,
           activeSignal,
           id,
+          url.headers,
         );
         this.allowed(id, kind, actor);
         if (action === 'exec' && result && typeof result === 'object') {

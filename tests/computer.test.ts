@@ -58,7 +58,7 @@ function fixture(deadline = 1000) {
     runtimeUrl: 'http://localhost',
     computerSupervisorUrl: 'http://127.0.0.1:4312',
     computerSupervisorToken: 'supervisor-secret',
-    computerToken: 'master-secret',
+    computerToken: 'master-secret-master-secret',
   };
   const service = new ComputerService(
     workspace,
