@@ -40,6 +40,42 @@ docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.
 
 Here, the app addresses computers by their container names. Computers have no published host ports. The supervisor lives on a separate control network, and only the supervisor mounts the Docker socket. Neither the web app nor a Dot's computer receives that socket. Changing the namespace changes which containers and volumes are selected; keep it stable and unique for each deployment.
 
+## Run computers on E2B sandboxes
+
+Instead of the Docker supervisor, each Dot's computer can be an [E2B](https://e2b.dev/docs) sandbox: a dedicated Linux VM running the same pinned OpenBot computer service. The OpenDots host needs no Docker engine, and the browser, files, shell, takeover and activity features work unchanged because the app still talks to the computer service's HTTP API.
+
+Set these values in `.env` first. Use a random `COMPUTER_TOKEN` of at least 24 characters:
+
+```dotenv
+COMPUTER_PROVIDER=e2b
+E2B_API_KEY=e2b_...                 # server-only; never sent into the sandbox
+COMPUTER_TOKEN=REPLACE_WITH_A_RANDOM_SECRET
+COMPUTER_NAMESPACE=opendots-REPLACE  # unique per deployment and workspace database
+# COMPUTER_E2B_TEMPLATE=opendots-computer:v1.0.0  # namespaced names and version tags supported
+# E2B_DOMAIN=                        # only for a non-default E2B cluster
+```
+
+Build the template in your E2B project, then start the app:
+
+```sh
+npm run computers:e2b:template
+npm run dev
+```
+
+The build uses the installed `e2b` SDK and loads `.env`; no global CLI or separate CLI login is required. It builds `COMPUTER_E2B_TEMPLATE`, defaulting to `opendots-computer`. The SDK build script injects the pins from [deployment/computers/release.json](../deployment/computers/release.json) into [e2b/e2b.Dockerfile](../deployment/computers/e2b/e2b.Dockerfile). CI checks the Docker Compose source pin against the manifest. `COMPUTER_SUPERVISOR_URL` and `COMPUTER_SUPERVISOR_TOKEN` are unused with E2B. Node's `--env-file` does not override exported shell variables; unset stray E2B configuration before building or running.
+
+How computers are managed:
+
+- **Ownership and concurrency:** metadata identifies the Dot and deployment. SQLite stores the active sandbox, pinned build and paused upgrade backups. Renewable leases coordinate Start, Stop and status across agent instances and server processes sharing that database. Keep the database and namespace together when restoring or moving a deployment; independent databases must use different namespaces.
+- **Private ingress:** every sandbox is created with `network.allowPublicTraffic: false`. The gateway supplies E2B's traffic access token and the derived per-Dot bearer token. Neither is returned to the browser, and both are redacted from upstream responses. The E2B traffic token stays in the gateway; only the per-Dot credential is injected into the service environment. This also protects extra ports opened by shell commands. Legacy public computers are migrated into a private sandbox on their next Start.
+- **Start and credential rotation:** Start explicitly resumes a paused computer and launches its service when needed. The sandbox receives `COMPUTER_BOT_ID` and `HMAC-SHA256(COMPUTER_TOKEN, "opendots-computer:" + dotId)`; the master token and API key remain on the server. Changing the master revokes the old service on its next status/action check and installs the new credential on Start. Restart every application process with the same configuration during rotation.
+- **Stop and idle pause:** Stop sends SIGTERM and waits for the service to finish flushing Chromium profiles, then takes a filesystem-only snapshot that ends all processes. A failed graceful shutdown is reported and leaves the sandbox intact. After 15 idle minutes E2B takes a memory snapshot, preserving pending cookie writes and suspended processes. Status checks and actions count as activity; status never resumes a paused computer. Only Start resumes it. Browser session cookies still follow Chromium's normal restart behavior; persistent cookies and workspace files survive explicit Stop.
+- **Template upgrades:** Start resolves the configured tag to an immutable build ID. A rebuilt tag, changed template name or legacy public sandbox triggers replacement. The old service is flushed and paused, `/workspace` and `/profiles` are streamed through the SDK into the replacement, and only a ready replacement becomes accessible. Files elsewhere in the old root filesystem are retained in the backup but are not migrated. Interrupted copies remain inaccessible and retry on Start. Stop stays available even when the desired template is missing or renamed.
+- **Backups and recovery:** an upgraded source is retained paused and is never automatically deleted. The application database records backup IDs; E2B metadata also links them to the Dot. Keep the original until you have verified files and browser logins in the replacement. If legacy duplicates exist without a database binding, Start refuses to choose a dataset and Stop pauses all of them. Preserve the data you need before resolving that ambiguity. A paused sandbox is kept until explicitly killed in E2B; killing it deletes its files.
+- **Isolation and policy:** the VM isolates each computer. The template's `user` account has passwordless sudo and outbound internet, so shell access grants control of that Dot's VM and its browser profiles. OpenDots permissions, audit and agent pause checks run in the gateway before forwarding actions. E2B plan runtime and storage limits apply. Volumes are not required; migration uses SDK file streams and local sandbox disks.
+
+After a build or upgrade, test two-Dot isolation, a workspace file and persistent browser login across Stop/Start, idle pause/Start, takeover, disabled permissions and token rotation. Confirm unauthenticated requests to both the computer port and a shell-started server are rejected by E2B. The automated SDK protocol tests use a local HTTP fixture; they do not provision live E2B resources.
+
 ## Use the computer
 
 - **Browser:** navigate and inspect the current page, including screenshots and element snapshots. Browser profiles keep cookies and logins across container restarts.
