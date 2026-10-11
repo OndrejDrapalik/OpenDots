@@ -24,6 +24,20 @@ const workspace = new WorkspaceStore(
   database,
   process.env.OWNER_ID ?? 'opendots-owner',
 );
+const computerProvider = process.env.COMPUTER_PROVIDER?.trim() || 'openbot';
+if (computerProvider !== 'openbot' && computerProvider !== 'e2b')
+  throw new Error('COMPUTER_PROVIDER must be openbot or e2b.');
+if (computerProvider === 'e2b') {
+  if (!process.env.E2B_API_KEY?.trim())
+    throw new Error('COMPUTER_PROVIDER=e2b requires E2B_API_KEY.');
+  // Sandboxes are matched by metadata across the whole E2B team, so every install
+  // that kept the default namespace would share one set of computers.
+  const ns = process.env.COMPUTER_NAMESPACE?.trim();
+  if (!ns || ns === 'opendots')
+    throw new Error(
+      'COMPUTER_PROVIDER=e2b requires a unique COMPUTER_NAMESPACE, e.g. opendots-$(openssl rand -hex 6).',
+    );
+}
 const config: PlatformConfig = {
   intelligenceKey: process.env.INTELLIGENCE_API_KEY,
   intelligenceApiUrl: process.env.INTELLIGENCE_API_URL || undefined,
@@ -37,6 +51,10 @@ const config: PlatformConfig = {
   computerSupervisorToken: process.env.COMPUTER_SUPERVISOR_TOKEN,
   computerToken: process.env.COMPUTER_TOKEN,
   computerNamespace: process.env.COMPUTER_NAMESPACE,
+  computerProvider,
+  e2bApiKey: process.env.E2B_API_KEY?.trim() || undefined,
+  e2bDomain: process.env.E2B_DOMAIN?.trim() || undefined,
+  computerE2bTemplate: process.env.COMPUTER_E2B_TEMPLATE?.trim() || undefined,
   voiceKey: process.env.VOICE_API_KEY,
   voiceModel: process.env.VOICE_MODEL,
   voiceName: process.env.VOICE_NAME ?? 'marin',

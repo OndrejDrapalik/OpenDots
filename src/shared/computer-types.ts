@@ -24,6 +24,8 @@ export interface ComputerControl {
 }
 export interface ComputerStatus {
   configured: boolean;
+  /** Where this Dot's computer runs: OpenBot's Docker supervisor or an E2B sandbox. */
+  provider: 'openbot' | 'e2b';
   state: 'not_configured' | 'stopped' | 'running' | 'unavailable';
   permissions: ComputerPermissions;
   audit: ComputerAudit[];

@@ -178,6 +178,11 @@ export function ComputerPanel({ dot }: { dot: Dot }) {
         <>
           <div className="computer-status">
             <strong>{status.state.replaceAll('_', ' ')}</strong>
+            {status.configured && (
+              <span className="computer-provider">
+                {status.provider === 'e2b' ? 'E2B sandbox' : 'Docker'}
+              </span>
+            )}
             {status.state !== 'running' && (
               <button disabled={busy} onClick={() => void refresh()}>
                 Refresh
@@ -192,7 +197,8 @@ export function ComputerPanel({ dot }: { dot: Dot }) {
               <h3>Connect a computer service</h3>
               <p>
                 This Dot does not have a computer service configured. Configure
-                the server’s computer service URL and token, then restart. Each
+                the server’s OpenBot supervisor URL and tokens, or set
+                COMPUTER_PROVIDER=e2b with an E2B API key, then restart. Each
                 Dot gets its own browser and workspace.
               </p>
               <a

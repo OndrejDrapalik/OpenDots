@@ -1,4 +1,5 @@
 import type { SetupStatus } from '../shared/types.js';
+export type ComputerProvider = 'openbot' | 'e2b';
 export interface PlatformConfig {
   intelligenceKey?: string;
   intelligenceApiUrl?: string;
@@ -10,6 +11,11 @@ export interface PlatformConfig {
   computerSupervisorToken?: string;
   computerToken?: string;
   computerNamespace?: string;
+  /** Where Dot computers run: OpenBot's Docker supervisor (default) or E2B sandboxes. */
+  computerProvider?: ComputerProvider;
+  e2bApiKey?: string;
+  e2bDomain?: string;
+  computerE2bTemplate?: string;
   browserUrl?: string;
   browserSecret?: string;
   voiceKey?: string;
